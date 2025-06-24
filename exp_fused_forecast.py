@@ -1,5 +1,5 @@
 from exp.exp_basic import Exp_Basic
-from models import FusedTimeModel
+from models import dual  # 修改：导入新的双分支模型
 from data_provider.data_factory import data_provider
 from utils.tools import EarlyStopping, adjust_learning_rate
 from utils.metrics import metric
@@ -12,7 +12,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from torch.optim import lr_scheduler
-from tqdm import tqdm  # 添加tqdm导入
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
@@ -29,6 +29,7 @@ def generate_timestamp():
 def generate_detailed_timestamp():
     """生成详细的时间戳字符串"""
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
 
 class Exp_Fused_Forecast(Exp_Basic):
     def __init__(self, args):
@@ -110,9 +111,9 @@ class Exp_Fused_Forecast(Exp_Basic):
         time_now = time.time()
         train_steps = len(train_loader)
 
-        # 设置早停patience为3，最大epoch为20
-        early_stopping = EarlyStopping(patience=3, verbose=True)
-        max_epochs = 20
+        # 设置早停patience为5，最大epoch为25
+        early_stopping = EarlyStopping(patience=5, verbose=True)
+        max_epochs = 25
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -124,6 +125,15 @@ class Exp_Fused_Forecast(Exp_Basic):
             epochs=max_epochs,
             max_lr=self.args.learning_rate
         )
+
+        # 记录训练历史
+        train_history = {
+            'train_loss': [],
+            'vali_loss': [],
+            'vali_r2': [],
+            'test_loss': [],
+            'test_r2': []
+        }
 
         # 创建总的epoch进度条
         epoch_pbar = tqdm(range(max_epochs), desc="Training Epochs", unit="epoch")
@@ -181,6 +191,13 @@ class Exp_Fused_Forecast(Exp_Basic):
             vali_loss, vali_r2 = self.vali(vali_data, vali_loader, criterion)
             test_loss, test_r2 = self.vali(test_data, test_loader, criterion)
 
+            # 记录历史
+            train_history['train_loss'].append(train_loss)
+            train_history['vali_loss'].append(vali_loss)
+            train_history['vali_r2'].append(vali_r2)
+            train_history['test_loss'].append(test_loss)
+            train_history['test_r2'].append(test_r2)
+
             # 使用tqdm.write输出结果，避免与进度条冲突
             tqdm.write(f"Epoch: {epoch + 1} cost time: {epoch_cost_time:.2f}s")
             tqdm.write(
@@ -201,6 +218,16 @@ class Exp_Fused_Forecast(Exp_Basic):
                 break
 
         epoch_pbar.close()
+
+        # 保存训练历史
+        history_file = os.path.join(path, f'training_history_{self.experiment_timestamp}.json')
+        train_history_serializable = {}
+        for key, value in train_history.items():
+            train_history_serializable[key] = [float(x) for x in value]
+
+        import json
+        with open(history_file, 'w') as f:
+            json.dump(train_history_serializable, f, indent=2)
 
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
@@ -437,7 +464,10 @@ class Exp_Fused_Forecast(Exp_Basic):
             'MSE': [mse] * min_length,
             'MAE': [mae] * min_length,
             'RMSE': [rmse] * min_length,
-            'R2': [r2] * min_length
+            'R2': [r2] * min_length,
+            'Final_d_model': [self.args.d_model] * min_length,
+            'Final_learning_rate': [self.args.learning_rate] * min_length,
+            'Final_dropout': [self.args.dropout] * min_length,
         })
 
         # 合并实验信息和结果
@@ -455,11 +485,6 @@ class Exp_Fused_Forecast(Exp_Basic):
 
         print("前5行结果预览:")
         print(results_df.head())
-
-        import matplotlib.pyplot as plt
-        import matplotlib.dates as mdates
-        from datetime import datetime
-        import seaborn as sns
 
         print("开始生成可视化图表...")
 
@@ -489,7 +514,7 @@ class Exp_Fused_Forecast(Exp_Basic):
                 label='Predicted SoH', marker='s', markersize=3, markevery=max(1, min_length // 50))
 
         # 设置标题和标签
-        ax.set_title('Battery SoH Prediction', fontsize=20, fontweight='bold', pad=20)
+        ax.set_title('Battery SoH Prediction - Dual Branch Model', fontsize=20, fontweight='bold', pad=20)
         ax.set_ylabel('State of Health (SoH)', fontsize=14, fontweight='bold')
         ax.set_xlabel(x_label, fontsize=14, fontweight='bold')
 
@@ -538,12 +563,12 @@ class Exp_Fused_Forecast(Exp_Basic):
         plt.tight_layout()
 
         # 保存高质量图片
-        plot_path = os.path.join(folder_path, 'battery_soh_prediction.png')
+        plot_path = os.path.join(folder_path, 'dual_branch_battery_soh_prediction.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight',
                     facecolor='white', edgecolor='none')
 
         # 同时保存PDF格式（适合论文使用）
-        pdf_path = os.path.join(folder_path, 'battery_soh_prediction.pdf')
+        pdf_path = os.path.join(folder_path, 'dual_branch_battery_soh_prediction.pdf')
         plt.savefig(pdf_path, bbox_inches='tight',
                     facecolor='white', edgecolor='none')
 
@@ -563,21 +588,21 @@ class Exp_Fused_Forecast(Exp_Basic):
         np.save(folder_path + f'true_{self.experiment_timestamp}.npy', trues)
 
         # 修改：保存到带时间戳的文本文件
-        result_file = f"result_fused_forecast_{self.experiment_timestamp}.txt"
+        result_file = f"result_dual_branch_forecast_{self.experiment_timestamp}.txt"
         f = open(result_file, 'a', encoding='utf-8')
         f.write(f"Experiment Time: {self.detailed_timestamp}\n")
         f.write(f"Dataset: {self.args.data_path}\n")
+        f.write(f"Model: {self.args.model}\n")
         f.write(timestamped_setting + "\n")
         f.write(f'mse:{mse:.6f}, mae:{mae:.6f}, rmse:{rmse:.6f}, mape:{mape:.6f}, mspe:{mspe:.6f}, R2:{r2:.6f}\n')
         f.write('\n')
         f.close()
 
         # 同时保存到总的结果文件（保持原有逻辑）
-        f = open("result_fused_forecast.txt", 'a', encoding='utf-8')
+        f = open("result_dual_branch_forecast.txt", 'a', encoding='utf-8')
         f.write(f"[{self.detailed_timestamp}] " + timestamped_setting + "\n")
         f.write(f'mse:{mse:.6f}, mae:{mae:.6f}, rmse:{rmse:.6f}, mape:{mape:.6f}, mspe:{mspe:.6f}, R2:{r2:.6f}\n')
         f.write('\n')
         f.close()
 
         return
-
